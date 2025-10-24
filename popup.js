@@ -264,11 +264,20 @@ document.addEventListener('DOMContentLoaded', function() {
 
       showMessage('Topics saved successfully!');
 
-      // Only reload if filtering is currently enabled
+      // Only update preferences if filtering is currently enabled
       if (isFiltering) {
         const tabs = await chrome.tabs.query({active: true, currentWindow: true});
         if (tabs[0]) {
-          await chrome.tabs.reload(tabs[0].id);
+          try {
+            await chrome.tabs.sendMessage(tabs[0].id, {
+              action: 'updatePreferences',
+              topics: topics
+            });
+            showMessage('Filtering updated with new preferences!');
+          } catch (error) {
+            console.error('Error updating preferences:', error);
+            showMessage('Error updating preferences. Please refresh the page.', true);
+          }
         }
       }
 

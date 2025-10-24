@@ -100,6 +100,19 @@ class ContentFilterBase {
     container.title = 'Allowed: Element kept';
   }
 
+  unhideAll() {
+    // Remove all filtering classes from all elements
+    const allFilteredElements = document.querySelectorAll('[data-gf-state]');
+    allFilteredElements.forEach(element => {
+      element.classList.remove('gf-waiting', 'gf-blocked', 'gf-allowed');
+      element.removeAttribute('data-gf-state');
+      element.title = '';
+    });
+
+    // Clear processed items to allow re-filtering
+    this.processedItems.clear();
+  }
+
   async processElementsBatch(elements, topics, elementType = 'item') {
 
     try {
@@ -333,6 +346,23 @@ class ContentFilterBase {
 
       if (request.action === 'stopFiltering') {
         this.stopFiltering();
+        sendResponse({ success: true });
+      }
+
+      if (request.action === 'updatePreferences') {
+        // Unhide all elements
+        this.unhideAll();
+
+        // Stop current monitoring
+        this.stopScrollMonitoring();
+
+        // Update current topics
+        this.currentTopics = request.topics;
+
+        // Restart filtering with new topics
+        processElementsFunction(request.topics);
+        startScrollMonitoringFunction(request.topics);
+
         sendResponse({ success: true });
       }
 
