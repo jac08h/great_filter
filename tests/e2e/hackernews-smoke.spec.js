@@ -1,9 +1,7 @@
 const {
   test,
   expect,
-  mockApiResponses,
-  seedExtensionState,
-  clearExtensionState,
+  openTestPage,
   getStoredState,
   sendMessageToActiveTab,
   waitForLastApiRequest,
@@ -11,25 +9,17 @@ const {
 const { loadHackerNews } = require('./helpers/site-fixtures');
 
 test.describe('Hacker News smoke tests', () => {
-  test.beforeEach(async ({ serviceWorker }) => {
-    // Make sure tests start with known storage and mocked network behaviour.
-    await clearExtensionState(serviceWorker);
-    await mockApiResponses(serviceWorker);
-    await seedExtensionState(serviceWorker, {
+  test('filters story rows and restores state after DOM changes', async ({ context, serviceWorker }) => {
+    const { page, bridgePage } = await openTestPage(context, serviceWorker, loadHackerNews, {
       filteringEnabled: false,
       allowedTopics: ['block politics'],
     });
-  });
-
-  test('filters story rows and restores state after DOM changes', async ({ context, serviceWorker }) => {
-    const page = await context.newPage();
-    await loadHackerNews(page);
 
     // Trigger filtering and confirm the content script acknowledged the request.
     const startResponse = await sendMessageToActiveTab(serviceWorker, {
       action: 'startFiltering',
       topics: ['block politics'],
-    });
+    }, bridgePage);
     expect(startResponse?.success).toBe(true);
 
     const containerCount = await page.evaluate(() => document.querySelectorAll('tr.athing').length);
@@ -37,7 +27,7 @@ test.describe('Hacker News smoke tests', () => {
 
     await page.waitForFunction(() => document.querySelector('tr.gf-blocked, tr.gf-allowed') !== null);
 
-    const usage = await getStoredState(serviceWorker, ['globalApiRequestCount']);
+    const usage = await getStoredState(serviceWorker, ['globalApiRequestCount'], bridgePage);
 
     const totalRows = await page.locator('tr.gf-blocked, tr.gf-allowed').count();
     expect(totalRows).toBeGreaterThanOrEqual(2);
@@ -59,9 +49,9 @@ test.describe('Hacker News smoke tests', () => {
       return elements.some(el => el.classList.contains('gf-blocked'));
     });
 
-    await waitForLastApiRequest(serviceWorker);
+    await waitForLastApiRequest(serviceWorker, bridgePage);
 
-    const storage = await getStoredState(serviceWorker, ['globalApiRequestCount']);
+    const storage = await getStoredState(serviceWorker, ['globalApiRequestCount'], bridgePage);
     expect(storage.globalApiRequestCount).toBeGreaterThanOrEqual(2);
   });
 });
