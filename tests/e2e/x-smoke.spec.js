@@ -1,9 +1,7 @@
 const {
   test,
   expect,
-  mockApiResponses,
-  seedExtensionState,
-  clearExtensionState,
+  openTestPage,
   sendMessageToActiveTab,
   waitForLastApiRequest,
 } = require('./fixtures/extension-fixture');
@@ -11,20 +9,12 @@ const { loadX } = require('./helpers/site-fixtures');
 const { isLiveMode } = require('./helpers/test-mode');
 
 test.describe('X smoke tests', () => {
-  test.beforeEach(async ({ serviceWorker }) => {
-    // Reset persistent storage and wire up the mocked LLM responses.
-    await clearExtensionState(serviceWorker);
-    await mockApiResponses(serviceWorker);
-    await seedExtensionState(serviceWorker, {
+  test('filters tweets and captures media context', async ({ context, serviceWorker }) => {
+    const { page, bridgePage } = await openTestPage(context, serviceWorker, loadX, {
       filteringEnabled: false,
       allowedTopics: ['block politics'],
       sendImages: true,
     });
-  });
-
-  test('filters tweets and captures media context', async ({ context, serviceWorker }) => {
-    const page = await context.newPage();
-    await loadX(page);
 
     if (isLiveMode()) {
       // Public timelines can be sparse; skip gracefully if no tweets render.
@@ -42,7 +32,7 @@ test.describe('X smoke tests', () => {
     const startResponse = await sendMessageToActiveTab(serviceWorker, {
       action: 'startFiltering',
       topics: ['block politics'],
-    });
+    }, bridgePage);
     expect(startResponse?.success).toBe(true);
 
     await page.waitForFunction(() => document.querySelector('article[data-gf-state]'), {
@@ -55,7 +45,7 @@ test.describe('X smoke tests', () => {
     const blockedTweets = await page.locator('article[data-testid="tweet"][data-gf-state="blocked"]').count();
     expect(blockedTweets).toBeGreaterThan(0);
 
-    const lastRequest = await waitForLastApiRequest(serviceWorker);
+    const lastRequest = await waitForLastApiRequest(serviceWorker, bridgePage);
     expect(lastRequest).toBeDefined();
     const messageContent = lastRequest.body.messages?.[0]?.content;
     const normalizedEntries = Array.isArray(messageContent)

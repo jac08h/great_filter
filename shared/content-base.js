@@ -54,6 +54,251 @@ const TITLE_PREFIXES = {
   ALLOWED: 'Allowed:',
 };
 
+let bridgeInitializationPromise = null;
+let bridgeMessageHandler = null;
+let activeBridgeToken = null;
+
+function requestBridgeToken() {
+  return new Promise(resolve => {
+    try {
+      chrome.runtime.sendMessage(
+        {
+          action: 'gf-test:requestBridgeToken',
+          webdriver: window.navigator?.webdriver === true,
+        },
+        response => {
+          const err = chrome.runtime.lastError;
+          if (err) {
+            resolve({ ok: false, error: err.message });
+            return;
+          }
+          resolve(response || { ok: false });
+        }
+      );
+    } catch (error) {
+      resolve({ ok: false, error: error?.message || String(error) });
+    }
+  });
+}
+
+async function createTestBridge() {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  if (window.__GF_TEST_BRIDGE__) {
+    return window.__GF_TEST_BRIDGE__;
+  }
+
+  if (bridgeInitializationPromise) {
+    return bridgeInitializationPromise;
+  }
+
+  bridgeInitializationPromise = (async () => {
+    const tokenResponse = await requestBridgeToken();
+    if (!tokenResponse?.ok || !tokenResponse.token) {
+      return null;
+    }
+
+    const token = tokenResponse.token;
+    activeBridgeToken = token;
+
+    const bridge = {
+      instance: null
+    };
+
+    function postResponse(id, payload) {
+      window.postMessage({ type: 'GF_TEST_BRIDGE_RESPONSE', id, payload }, '*');
+    }
+
+    function postError(id, error) {
+      window.postMessage({ type: 'GF_TEST_BRIDGE_RESPONSE', id, error: error?.message || String(error) }, '*');
+    }
+
+    function callStorage(method, value) {
+      return new Promise((resolve, reject) => {
+        try {
+          const args = [];
+          if (typeof value !== 'undefined') {
+            args.push(value);
+          }
+
+          chrome.storage.local[method](...args, result => {
+            const err = chrome.runtime.lastError;
+            if (err) {
+              reject(new Error(err.message));
+            } else {
+              resolve(result);
+            }
+          });
+        } catch (error) {
+          reject(error);
+        }
+      });
+    }
+
+    function callRuntime(message) {
+      return new Promise((resolve, reject) => {
+        try {
+          const payload =
+            message && typeof message === 'object' && !Array.isArray(message)
+              ? { ...message }
+              : message;
+
+          if (
+            payload &&
+            typeof payload.action === 'string' &&
+            payload.action.startsWith('gf-test:')
+          ) {
+            if (!activeBridgeToken) {
+              reject(new Error('Test bridge token unavailable'));
+              return;
+            }
+            payload.bridgeToken = activeBridgeToken;
+          }
+
+          const result = chrome.runtime.sendMessage(payload, response => {
+            const err = chrome.runtime.lastError;
+            if (err) {
+              reject(new Error(err.message));
+              return;
+            }
+            resolve(response);
+          });
+
+          if (result && typeof result.then === 'function') {
+            result.then(resolve).catch(error => {
+              reject(error instanceof Error ? error : new Error(String(error)));
+            });
+          }
+        } catch (error) {
+          reject(error);
+        }
+      });
+    }
+
+    async function handleForwardMessage(instance, request) {
+      if (!instance) {
+        throw new Error('No content filter instance available');
+      }
+
+      if (request.action === 'startFiltering') {
+        instance.isFilteringActive = true;
+        instance.processedItems.clear();
+        await instance.processInitialElements(request.topics);
+        instance.startScrollMonitoring(request.topics, () => instance.extractItemElements());
+        return { success: true };
+      }
+
+      if (request.action === 'stopFiltering') {
+        instance.stopFiltering();
+        return { success: true };
+      }
+
+      if (request.action === 'updatePreferences') {
+        instance.unhideAll();
+        instance.stopScrollMonitoring();
+        instance.currentTopics = request.topics;
+        await instance.processInitialElements(request.topics);
+        instance.startScrollMonitoring(request.topics, () => instance.extractItemElements());
+        return { success: true };
+      }
+
+      if (request.action === 'getFilteringState') {
+        return {
+          isActive: instance.isFilteringActive,
+          topics: instance.currentTopics
+        };
+      }
+
+      if (request.action === 'getRecommendedFilter') {
+        const result = await instance.getRecommendedFilter();
+        return result;
+      }
+
+      throw new Error(`Unsupported forward message action: ${request.action}`);
+    }
+
+    if (bridgeMessageHandler) {
+      window.removeEventListener('message', bridgeMessageHandler);
+    }
+
+    bridgeMessageHandler = event => {
+      if (event.source !== window || !event.data) {
+        return;
+      }
+
+      if (event.data.type === 'GF_TEST_BRIDGE_INIT') {
+        window.postMessage({ type: 'GF_TEST_BRIDGE_READY', id: event.data.id, token }, '*');
+        return;
+      }
+
+      if (event.data.type !== 'GF_TEST_BRIDGE') {
+        return;
+      }
+
+      const { id, action, payload, token: messageToken } = event.data;
+      if (messageToken !== token) {
+        return;
+      }
+
+      (async () => {
+        switch (action) {
+          case 'ping':
+            return { ok: true };
+          case 'clearStorage':
+            await callStorage('clear');
+            return { ok: true };
+          case 'setStorage':
+            await callStorage('set', payload?.state || {});
+            return { ok: true };
+          case 'getStorage': {
+            const data = await callStorage('get', payload?.keys || null);
+            return { data };
+          }
+          case 'installMocks':
+            await callRuntime({ action: 'gf-test:installMocks' });
+            return { ok: true };
+          case 'getLastApiRequest': {
+            const response = await callRuntime({ action: 'gf-test:getLastApiRequest' });
+            return response;
+          }
+          case 'runtimeMessage': {
+            const response = await callRuntime(payload?.message || {});
+            return { response };
+          }
+          case 'forwardMessage':
+            return await handleForwardMessage(bridge.instance, payload); // eslint-disable-line no-return-await
+          default:
+            throw new Error(`Unknown GF test bridge action: ${action}`);
+        }
+      })()
+        .then(result => {
+          postResponse(id, result);
+        })
+        .catch(error => {
+          postError(id, error);
+        });
+    };
+
+    window.addEventListener('message', bridgeMessageHandler);
+
+    window.__GF_TEST_BRIDGE_TOKEN__ = token;
+    window.__GF_TEST_BRIDGE_READY__ = true;
+    window.__GF_TEST_BRIDGE__ = bridge;
+    window.postMessage({ type: 'GF_TEST_BRIDGE_READY', token }, '*');
+
+    return bridge;
+  })();
+
+  const bridge = await bridgeInitializationPromise;
+  if (!bridge) {
+    bridgeInitializationPromise = null;
+  }
+  return bridge;
+}
+
+
 const gfStorageGet = (...args) => GFBrowser.storageGet(...args);
 const gfRuntimeSendMessage = (...args) => GFBrowser.runtimeSendMessage(...args);
 
@@ -69,6 +314,16 @@ class ContentFilterBase {
     this.isScrollActive = false;
     this.scrollActivityTimeout = null;
     this.extractElementsFunction = null;
+
+    createTestBridge()
+      .then(bridge => {
+        if (bridge) {
+          bridge.instance = this;
+        }
+      })
+      .catch(error => {
+        console.warn('GF test bridge setup failed:', error);
+      });
   }
 
 

@@ -1,9 +1,7 @@
 const {
   test,
   expect,
-  mockApiResponses,
-  seedExtensionState,
-  clearExtensionState,
+  openTestPage,
   getStoredState,
   sendMessageToActiveTab,
   waitForLastApiRequest,
@@ -12,20 +10,11 @@ const { loadYouTube } = require('./helpers/site-fixtures');
 const { isLiveMode } = require('./helpers/test-mode');
 
 test.describe('YouTube smoke tests', () => {
-  test.beforeEach(async ({ serviceWorker }) => {
-    // Reset storage and configure the mocks before every test run.
-    await clearExtensionState(serviceWorker);
-    await mockApiResponses(serviceWorker);
-    await seedExtensionState(serviceWorker, {
+  test('filters initial grid items and processes new content', async ({ context, serviceWorker }) => {
+    const { page, bridgePage } = await openTestPage(context, serviceWorker, loadYouTube, {
       filteringEnabled: false,
       allowedTopics: ['block politics'],
     });
-  });
-
-  test('filters initial grid items and processes new content', async ({ context, serviceWorker }) => {
-    const page = await context.newPage();
-    await loadYouTube(page);
-    console.log('YouTube current URL:', page.url());
 
     if (isLiveMode()) {
       // Ensure the dynamic data bootstrap is present before continuing.
@@ -43,7 +32,7 @@ test.describe('YouTube smoke tests', () => {
     const startResponse = await sendMessageToActiveTab(serviceWorker, {
       action: 'startFiltering',
       topics: ['block politics'],
-    });
+    }, bridgePage);
     expect(startResponse?.success).toBe(true);
 
     await page.waitForFunction(() => document.querySelector('[data-gf-state]'), {
@@ -79,15 +68,15 @@ test.describe('YouTube smoke tests', () => {
       await expect(newCard).toHaveAttribute('data-gf-state', 'allowed', { timeout: 5000 });
     }
 
-    const stored = await getStoredState(serviceWorker, ['globalApiRequestCount']);
+    const stored = await getStoredState(serviceWorker, ['globalApiRequestCount'], bridgePage);
     expect(stored.globalApiRequestCount).toBeGreaterThanOrEqual(3);
 
-    await waitForLastApiRequest(serviceWorker);
+    await waitForLastApiRequest(serviceWorker, bridgePage);
 
     // Ask the extension for a recommended filter and confirm the mocked response.
     const recommendationResponse = await sendMessageToActiveTab(serviceWorker, {
       action: 'getRecommendedFilter',
-    });
+    }, bridgePage);
 
     expect(recommendationResponse.recommendation).toBe('Block politics');
   });
