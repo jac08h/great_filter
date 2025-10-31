@@ -55,7 +55,20 @@ async function mockApiResponses(serviceWorker) {
 
       self.__gf_lastApiRequest = { url, body };
 
-      if (body.model === 'google/gemini-2.5-flash-lite') {
+      const messageContent = body.messages?.[0]?.content;
+      const isRecommendationRequest = (() => {
+        if (typeof messageContent === 'string') {
+          return messageContent.toLowerCase().includes('suggest');
+        }
+        if (Array.isArray(messageContent)) {
+          return messageContent.some(entry =>
+            entry?.type === 'text' && entry?.text?.toLowerCase().includes('suggest')
+          );
+        }
+        return false;
+      })();
+
+      if (isRecommendationRequest) {
         const recommendationPayload = {
           choices: [
             {
