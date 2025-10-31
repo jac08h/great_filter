@@ -4,6 +4,7 @@ const path = require('path');
 const { chromium, firefox, expect, test: base } = require('@playwright/test');
 const { withExtension } = require('playwright-webextext');
 const { isLiveMode } = require('../helpers/test-mode');
+const { isRecommendationRequest } = require('../../../shared/test-utils');
 
 const EXTENSION_PATH = path.resolve(__dirname, '..', '..', '..');
 const chromiumWithExtension = withExtension(chromium, EXTENSION_PATH);
@@ -163,9 +164,11 @@ async function ensureServiceWorkerActive(context) {
 
 async function mockApiResponses(serviceWorker, page) {
   if (!isFirefoxBridge(serviceWorker)) {
-    await serviceWorker.evaluate(() => {
+    await serviceWorker.evaluate((isRecommendationRequestFn) => {
       const originalFetch = self.__gf_originalFetch || fetch;
       self.__gf_originalFetch = originalFetch;
+
+      const isRecommendationRequest = new Function('return ' + isRecommendationRequestFn)();
 
       // Intercept the extension's fetch calls to keep Playwright runs deterministic.
       fetch = async (input, init = {}) => {
@@ -186,20 +189,7 @@ async function mockApiResponses(serviceWorker, page) {
 
         self.__gf_lastApiRequest = { url, body };
 
-        const messageContent = body.messages?.[0]?.content;
-        const isRecommendationRequest = (() => {
-          if (typeof messageContent === 'string') {
-            return messageContent.toLowerCase().includes('suggest');
-          }
-          if (Array.isArray(messageContent)) {
-            return messageContent.some(entry =>
-              entry?.type === 'text' && entry?.text?.toLowerCase().includes('suggest')
-            );
-          }
-          return false;
-        })();
-
-        if (isRecommendationRequest) {
+        if (isRecommendationRequest(body)) {
           const recommendationPayload = {
             choices: [
               {
@@ -264,7 +254,7 @@ async function mockApiResponses(serviceWorker, page) {
           headers: { 'Content-Type': 'application/json' },
         });
       };
-    });
+    }, isRecommendationRequest.toString());
     return;
   }
 
