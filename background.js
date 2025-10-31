@@ -3,7 +3,8 @@
     'browser-polyfill.js',
     'shared/browser-api.js',
     'config.js',
-    'shared/prompts.js'
+    'shared/prompts.js',
+    'shared/test-utils.js'
   ];
 
   async function loadScript(scriptPath) {
@@ -134,7 +135,7 @@
 
       self.__gf_lastApiRequest = { url, body };
 
-      if (body.model === CONFIG.RECOMMENDATION_MODEL) {
+      if (TestUtils.isRecommendationRequest(body)) {
         const recommendationPayload = {
           choices: [
             {
@@ -571,7 +572,7 @@
       console.log('Recommendation prompt:\n', prompt);
 
       const requestBody = {
-        model: CONFIG.RECOMMENDATION_MODEL,
+        model: CONFIG.MODEL,
         messages: [
           {
             role: 'user',

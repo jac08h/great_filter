@@ -549,22 +549,46 @@ document.addEventListener('DOMContentLoaded', function() {
     }
   }
 
+  async function fetchProxyModel() {
+    try {
+      const response = await fetch(CONFIG.PROXY_URL, {
+        method: 'GET'
+      });
+      if (response.ok) {
+        const data = await response.json();
+        return data.model;
+      }
+    } catch (error) {
+      console.error('Error fetching proxy model:', error);
+    }
+    return null;
+  }
+
   async function loadModelSettings() {
     try {
       modelSelect.innerHTML = '';
-
-      CONFIG.AVAILABLE_MODELS.forEach(model => {
-        const option = document.createElement('option');
-        option.value = model;
-        option.textContent = model;
-        modelSelect.appendChild(option);
-      });
 
       const result = await storageGet(['selectedModel', 'useOwnApiKey']);
       const selectedModel = result.selectedModel || CONFIG.MODEL;
       const useOwnApiKey = result.useOwnApiKey === true;
 
-      modelSelect.value = selectedModel;
+      if (!useOwnApiKey) {
+        const proxyModel = await fetchProxyModel();
+        const defaultOption = document.createElement('option');
+        defaultOption.value = 'default';
+        defaultOption.textContent = proxyModel ? `Default (${proxyModel})` : 'Default';
+        modelSelect.appendChild(defaultOption);
+        modelSelect.value = 'default';
+      } else {
+        CONFIG.AVAILABLE_MODELS.forEach(model => {
+          const option = document.createElement('option');
+          option.value = model;
+          option.textContent = model;
+          modelSelect.appendChild(option);
+        });
+        modelSelect.value = selectedModel;
+      }
+
       modelSelect.disabled = !useOwnApiKey;
 
       updateModelSelectState();
@@ -585,7 +609,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
   }
 
-  function updateModelSelectState() {
+  async function updateModelSelectState() {
     const useOwnApiKey = useOwnApiKeyRadio.checked;
     const modelSection = document.getElementById('modelSection');
 
@@ -593,8 +617,25 @@ document.addEventListener('DOMContentLoaded', function() {
 
     if (!useOwnApiKey) {
       modelSection.classList.add('disabled');
+      modelSelect.innerHTML = '';
+      const proxyModel = await fetchProxyModel();
+      const defaultOption = document.createElement('option');
+      defaultOption.value = 'default';
+      defaultOption.textContent = proxyModel ? `Default (${proxyModel})` : 'Default';
+      modelSelect.appendChild(defaultOption);
+      modelSelect.value = 'default';
     } else {
       modelSection.classList.remove('disabled');
+      modelSelect.innerHTML = '';
+      CONFIG.AVAILABLE_MODELS.forEach(model => {
+        const option = document.createElement('option');
+        option.value = model;
+        option.textContent = model;
+        modelSelect.appendChild(option);
+      });
+      const result = await storageGet(['selectedModel']);
+      const selectedModel = result.selectedModel || CONFIG.MODEL;
+      modelSelect.value = selectedModel;
     }
   }
 
