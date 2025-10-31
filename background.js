@@ -348,7 +348,7 @@
       console.log('Recommendation prompt:\n', prompt);
 
       const requestBody = {
-        model: CONFIG.RECOMMENDATION_MODEL,
+        model: CONFIG.MODEL,
         messages: [
           {
             role: 'user',
