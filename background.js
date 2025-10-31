@@ -57,8 +57,149 @@
 
   const tabFilteringStates = new Map();
   let globalApiRequestCount = 0;
+  let testMocksInstalled = false;
+  const TEST_BRIDGE_TOKEN_TTL = 5 * 60 * 1000;
+  const testBridgeAuthorizations = new Map();
+
+  function generateTestBridgeToken() {
+    const buffer = new Uint8Array(16);
+    crypto.getRandomValues(buffer);
+    return Array.from(buffer, byte => byte.toString(16).padStart(2, '0')).join('');
+  }
+
+  function getActiveBridgeAuthorization(tabId) {
+    const entry = testBridgeAuthorizations.get(tabId);
+    if (!entry) {
+      return null;
+    }
+    if (Date.now() > entry.expiresAt) {
+      testBridgeAuthorizations.delete(tabId);
+      return null;
+    }
+    return entry;
+  }
+
+  function setBridgeAuthorization(tabId) {
+    const token = generateTestBridgeToken();
+    const expiresAt = Date.now() + TEST_BRIDGE_TOKEN_TTL;
+    const entry = { token, expiresAt };
+    testBridgeAuthorizations.set(tabId, entry);
+    return entry;
+  }
+
+  function validateBridgeRequest(sender, bridgeToken) {
+    const tabId = sender?.tab?.id;
+    if (typeof tabId !== 'number') {
+      return null;
+    }
+    const entry = getActiveBridgeAuthorization(tabId);
+    if (!entry || entry.token !== bridgeToken) {
+      return null;
+    }
+    // Extend authorization on activity to keep tests alive.
+    entry.expiresAt = Date.now() + TEST_BRIDGE_TOKEN_TTL;
+    return { tabId, entry };
+  }
+
+  function isTestEnvironment() {
+    return globalThis.__GF_ENABLE_TEST_BRIDGE__ === true || globalThis.navigator?.webdriver === true;
+  }
 
   initializeGlobalApiCounter();
+
+  function installTestApiMocks() {
+    if (testMocksInstalled) {
+      return;
+    }
+
+    const originalFetch = fetch;
+    self.__gf_originalFetch = originalFetch;
+    testMocksInstalled = true;
+
+    fetch = async (input, init = {}) => {
+      const url = typeof input === 'string' ? input : input?.url || '';
+      const isFilteringRequest =
+        url.includes('great-filter-vps.vercel.app') || url.includes('openrouter.ai');
+
+      if (!isFilteringRequest) {
+        return originalFetch(input, init);
+      }
+
+      let body = {};
+      try {
+        body = init.body ? JSON.parse(init.body) : {};
+      } catch (error) {
+        console.error('Failed to parse mocked request body', error);
+      }
+
+      self.__gf_lastApiRequest = { url, body };
+
+      if (body.model === CONFIG.RECOMMENDATION_MODEL) {
+        const recommendationPayload = {
+          choices: [
+            {
+              message: {
+                content: 'Block politics',
+              },
+            },
+          ],
+        };
+        return new Response(JSON.stringify(recommendationPayload), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      const itemCount = (() => {
+        if (typeof body.postCount === 'number') {
+          return body.postCount;
+        }
+
+        const messageContent = body.messages?.[0]?.content;
+        if (Array.isArray(messageContent)) {
+          return messageContent.filter(entry => {
+            if (entry?.type !== 'text') return false;
+            return /\d+\./.test(entry.text || '');
+          }).length;
+        }
+
+        if (typeof messageContent === 'string') {
+          const matches = messageContent.match(/\n?\d+\./g);
+          if (matches) {
+            return matches.length;
+          }
+          return messageContent.trim() ? 1 : 0;
+        }
+
+        return 0;
+      })();
+
+      const lines = Array.from({ length: itemCount || 1 }, (_, index) => {
+        const decision = index % 2 === 0 ? 'YES' : 'NO';
+        return `${index + 1}. → ${decision}`;
+      }).join('\n');
+
+      const payload = {
+        choices: [
+          {
+            message: {
+              content: lines,
+            },
+          },
+        ],
+        usage: {
+          prompt_tokens: 10 * (itemCount || 1),
+          completion_tokens: 8 * (itemCount || 1),
+          total_tokens: 18 * (itemCount || 1),
+        },
+      };
+
+      return new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    };
+  }
 
   async function getApiConfiguration() {
     try {
@@ -124,7 +265,89 @@
     }
   }
 
-  chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
+  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    const isTestAction = typeof request.action === 'string' && request.action.startsWith('gf-test:');
+    const isExtensionSender =
+      !sender ||
+      (typeof sender.url === 'string' && sender.url.startsWith('chrome-extension://')) ||
+      sender.origin === 'null';
+
+    if (request.action === 'gf-test:requestBridgeToken') {
+      const tabId = sender?.tab?.id;
+      if (typeof tabId !== 'number') {
+        sendResponse({ ok: false, error: 'TAB_ID_REQUIRED' });
+        return true;
+      }
+
+      const shouldAutoAuthorize =
+        request.webdriver === true || isTestEnvironment();
+
+      let entry = getActiveBridgeAuthorization(tabId);
+      if (!entry) {
+        if (!shouldAutoAuthorize) {
+          sendResponse({ ok: false, error: 'UNAUTHORIZED' });
+          return true;
+        }
+        entry = setBridgeAuthorization(tabId);
+      }
+
+      entry.expiresAt = Date.now() + TEST_BRIDGE_TOKEN_TTL;
+      sendResponse({ ok: true, token: entry.token, expiresAt: entry.expiresAt });
+      return true;
+    }
+
+    if (isTestAction) {
+      const authorization = validateBridgeRequest(sender, request.bridgeToken);
+      if (!authorization) {
+        sendResponse({ ok: false, error: 'UNAUTHORIZED' });
+        return true;
+      }
+
+      if (request.action === 'gf-test:clearStorage') {
+        chrome.storage.local.clear(() => {
+          if (chrome.runtime.lastError) {
+            sendResponse({ ok: false, error: chrome.runtime.lastError.message });
+          } else {
+            sendResponse({ ok: true });
+          }
+        });
+        return true;
+      }
+
+      if (request.action === 'gf-test:setStorage') {
+        chrome.storage.local.set(request.state || {}, () => {
+          if (chrome.runtime.lastError) {
+            sendResponse({ ok: false, error: chrome.runtime.lastError.message });
+          } else {
+            sendResponse({ ok: true });
+          }
+        });
+        return true;
+      }
+
+      if (request.action === 'gf-test:getStorage') {
+        chrome.storage.local.get(request.keys || null, result => {
+          if (chrome.runtime.lastError) {
+            sendResponse({ ok: false, error: chrome.runtime.lastError.message });
+          } else {
+            sendResponse({ ok: true, data: result });
+          }
+        });
+        return true;
+      }
+
+      if (request.action === 'gf-test:installMocks') {
+        installTestApiMocks();
+        sendResponse({ ok: true });
+        return true;
+      }
+
+      if (request.action === 'gf-test:getLastApiRequest') {
+        sendResponse({ ok: true, request: self.__gf_lastApiRequest || null });
+        return true;
+      }
+    }
+
     if (request.action === 'checkItemTitlesBatch') {
       incrementGlobalApiCounter(request.items.length);
 
